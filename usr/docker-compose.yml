@@ -1,0 +1,148 @@
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------
+  # SIEM & Storage
+  # ---------------------------------------------------------
+  opensearch-node1:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: opensearch-node1
+    environment:
+      - cluster.name=soc-cluster
+      - node.name=opensearch-node1
+      - discovery.seed_hosts=opensearch-node1
+      - cluster.initial_master_nodes=opensearch-node1
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms1024m -Xmx1024m"
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - DISABLE_SECURITY_PLUGIN=true # For local dev only. Enable in prod!
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch-data1:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    networks:
+      - soc-net
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.11.0
+    container_name: opensearch-dashboards
+    ports:
+      - "5601:5601"
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch-node1:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    networks:
+      - soc-net
+    depends_on:
+      - opensearch-node1
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: soc-postgres
+    environment:
+      POSTGRES_USER: soc_user
+      POSTGRES_PASSWORD: soc_password
+      POSTGRES_DB: soc_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - soc-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: soc-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - soc-net
+
+  # ---------------------------------------------------------
+  # AI Analyst (Local LLM)
+  # ---------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: soc-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - soc-net
+
+  # ---------------------------------------------------------
+  # Backend (FastAPI)
+  # ---------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: soc-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://soc_user:soc_password@postgres:5432/soc_db
+      - REDIS_URL=redis://redis:6379/0
+      - OPENSEARCH_URL=http://opensearch-node1:9200
+      - OLLAMA_URL=http://ollama:11434
+    volumes:
+      - ./backend:/app
+    networks:
+      - soc-net
+    depends_on:
+      - postgres
+      - redis
+      - opensearch-node1
+      - ollama
+
+  # ---------------------------------------------------------
+  # IDS & EDR (Simulated/Containerized for Demo)
+  # ---------------------------------------------------------
+  suricata:
+    image: jasonish/suricata:latest
+    container_name: soc-suricata
+    network_mode: "host" # Needs host network to sniff traffic
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_NICE
+    volumes:
+      - ./config/suricata/suricata.yaml:/etc/suricata/suricata.yaml:ro
+      - ./config/suricata/rules:/var/lib/suricata/rules:ro
+      - suricata-logs:/var/log/suricata
+
+  wazuh-manager:
+    image: wazuh/wazuh-manager:4.7.2
+    container_name: soc-wazuh-manager
+    ports:
+      - "1514:1514/udp"
+      - "1515:1515/tcp"
+      - "514:514/udp"
+      - "55000:55000/tcp"
+    environment:
+      - WAZUH_API_USER=wazuh
+      - WAZUH_API_PASSWORD=wazuh
+    volumes:
+      - wazuh-data:/var/ossec/data
+    networks:
+      - soc-net
+
+volumes:
+  opensearch-data1:
+  postgres-data:
+  ollama-data:
+  suricata-logs:
+  wazuh-data:
+
+networks:
+  soc-net:
+    driver: bridge
